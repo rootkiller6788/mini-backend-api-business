@@ -8,12 +8,12 @@
 #define GRPC_MAX_SERVICE_NAME    128
 #define GRPC_MAX_METHOD_NAME     128
 #define GRPC_MAX_MESSAGE_NAME    128
-#define GRPC_MAX_FIELDS          64
-#define GRPC_MAX_METHODS         32
-#define GRPC_MAX_SERVICES        16
+#define GRPC_MAX_FIELDS          32
+#define GRPC_MAX_METHODS         16
+#define GRPC_MAX_SERVICES        8
 #define GRPC_MAX_FRAME_SIZE      65536
-#define GRPC_MAX_STREAM_ITEMS    256
-#define GRPC_MAX_METADATA_ITEMS  32
+#define GRPC_MAX_STREAM_ITEMS    64
+#define GRPC_MAX_METADATA_ITEMS  16
 #define GRPC_MAX_PROTO_LEN       16384
 
 typedef enum {
@@ -173,5 +173,25 @@ bool grpc_sim_open_server_stream(grpc_sim_t* g, const char* service, const char*
 bool grpc_sim_read_stream(grpc_sim_t* g, uint32_t stream_id, uint8_t* data, int32_t* len, bool* done);
 bool grpc_sim_write_stream(grpc_sim_t* g, uint32_t stream_id, const uint8_t* data, int32_t len);
 bool grpc_sim_close_stream(grpc_sim_t* g, uint32_t stream_id, grpc_status_code_t status);
+
+uint32_t grpc_varint_encode(uint64_t value, uint8_t* buf);
+int32_t  grpc_varint_decode(const uint8_t* buf, int32_t max_len, uint64_t* value);
+uint32_t grpc_zigzag32_encode(int32_t value);
+int32_t  grpc_zigzag32_decode(uint32_t value);
+uint64_t grpc_zigzag64_encode(int64_t value);
+int64_t  grpc_zigzag64_decode(uint64_t value);
+
+int32_t grpc_wire_encode_field(uint8_t* buf, int32_t field_number, grpc_proto_type_t type,
+                                const void* value, int32_t value_len);
+int32_t grpc_wire_decode_field(const uint8_t* buf, int32_t len, int32_t* field_number,
+                                grpc_proto_type_t* type, void* value, int32_t* value_len);
+
+bool grpc_sim_encode_message(grpc_message_def_t* msg, const void** field_values,
+                              const int32_t* field_lens, int32_t field_count,
+                              uint8_t* out, int32_t* out_len);
+bool grpc_sim_decode_message(grpc_message_def_t* msg, const uint8_t* data, int32_t len,
+                              void** field_values, int32_t* field_lens, int32_t* field_count);
+
+bool grpc_sim_health_check(grpc_sim_t* g, const char* service_name, grpc_status_code_t* status);
 
 #endif

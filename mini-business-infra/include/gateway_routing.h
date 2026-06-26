@@ -115,6 +115,48 @@ void          gw_request_free(gw_request_t *req);
 void          gw_response_init(gw_response_t *resp);
 void          gw_response_free(gw_response_t *resp);
 
+/* === L5: Exponential Backoff with Jitter === */
+typedef enum {
+    GW_RETRY_JITTER_NONE         = 0,
+    GW_RETRY_JITTER_FULL         = 1,
+    GW_RETRY_JITTER_DECORRELATED = 2
+} gw_jitter_strategy_t;
+
+typedef struct {
+    int                   max_retries;
+    int32_t               base_delay_ms;
+    int32_t               max_delay_ms;
+    gw_jitter_strategy_t  jitter_strategy;
+    int                   retry_on_5xx;
+    int                   retry_on_timeout;
+} gw_retry_policy_t;
+
+int           gw_forward_with_retry(gw_gateway_t *gateway, gw_request_t *req,
+                                     gw_response_t *resp, const gw_retry_policy_t *policy);
+
+/* L7: Circuit Breaker integration (requires circuit_breaker.h) */
+struct cb_circuit_breaker;
+int           gw_forward_with_circuit_breaker(gw_gateway_t *gateway, gw_request_t *req,
+                                               gw_response_t *resp,
+                                               struct cb_circuit_breaker *cb);
+
+/* L5: Smooth Weighted Round Robin */
+gw_upstream_t *gw_upstream_select_swrr(gw_gateway_t *gateway,
+                                        const char *service_name);
+
+/* L7: Route observability */
+typedef struct {
+    char    path[GW_MAX_PATH_LEN];
+    int64_t request_count;
+    int64_t error_count;
+    int64_t total_latency_us;
+    int64_t last_request_time;
+} gw_route_stats_t;
+
+void          gw_route_stats_record(gw_gateway_t *gateway, const char *path,
+                                     int status_code, int64_t latency_us);
+int           gw_route_stats_get(const char *path, gw_route_stats_t *out);
+
 #ifdef __cplusplus
 }
 #endif

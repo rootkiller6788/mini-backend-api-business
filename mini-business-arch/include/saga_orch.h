@@ -71,7 +71,7 @@ typedef struct {
     char            saga_id[SAGA_ID_LEN];
     char            step_name[SAGA_NAME_LEN];
     char            service_name[SAGA_NAME_LEN];
-    char            payload[CQRS_PAYLOAD_LEN];
+    char            payload[SAGA_PAYLOAD_LEN];
     size_t          payload_size;
     SagaStepStatus  step_status;
 } ChoreographyEvent;

@@ -1,0 +1,15 @@
+import sys
+c=[]
+def L(s): c.append(s)
+L("#include <stdio.h>")
+L("#include <stdlib.h>")
+L("#include <string.h>")
+L("#include <time.h>")
+L("#include "http_core.h"")
+L("#include "router.h"")
+L("#include "middleware.h"")
+L("#include "json_helper.h"")
+L("#include "websocket.h"")
+L("#include "session.h"")
+L("#include "static_serve.h"")
+L("#include "cgi_handler.h"")

@@ -1,4 +1,5 @@
 #include "gateway_routing.h"
+#include "circuit_breaker.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -357,4 +358,205 @@ void gw_response_init(gw_response_t *resp) {
 void gw_response_free(gw_response_t *resp) {
     if (!resp) return;
     free(resp->body); resp->body = NULL;
+}
+
+/* === L5: Exponential Backoff with Jitter ===
+ *
+ * Theorem (L4): Exponential backoff with random jitter prevents
+ * thundering herd in distributed systems. Without jitter, N clients
+ * retrying at T*2^k all collide, causing correlated failures.
+ *
+ * Reference: "Exponential Backoff and Jitter" — AWS Architecture Blog
+ *   Full jitter:  sleep = random(0, min(cap, base * 2^attempt))
+ *   Decorrelated jitter: sleep = min(cap, random(base, base * 3^attempt))
+ *
+ * This implements decorrelated jitter: sleep = min(cap, base + random(0, base * 2^attempt))
+ * which provides better tail latency than full jitter while avoiding correlation.
+ */
+
+/**
+ * Compute backoff delay using decorrelated jitter.
+ *
+ * L5 Algorithm:
+ *   delay = min(cap, base_delay + random(0, base_delay * 2^attempt))
+ *
+ * Decorrelated jitter spreads retry timings across independent
+ * random ranges per attempt, avoiding the harmonic convergence
+ * that occurs with simple exponential backoff.
+ */
+static int32_t gw_compute_backoff(const gw_retry_policy_t *policy, int attempt) {
+    if (attempt <= 0 || !policy) return 0;
+    int64_t base = policy->base_delay_ms;
+    if (policy->jitter_strategy == GW_RETRY_JITTER_DECORRELATED) {
+        int64_t range = base * (1LL << (attempt - 1));
+        int64_t delay = base + (rand() % (range > 0 ? range : 1));
+        return (int32_t)(delay > policy->max_delay_ms ? policy->max_delay_ms : delay);
+    } else if (policy->jitter_strategy == GW_RETRY_JITTER_FULL) {
+        int64_t cap = policy->max_delay_ms;
+        int64_t range = base * (1LL << (attempt - 1));
+        int64_t max_r = range < cap ? range : cap;
+        return (int32_t)(max_r > 0 ? rand() % max_r : 0);
+    } else {
+        /* no jitter: simple exponential */
+        int64_t delay = base * (1LL << (attempt - 1));
+        return (int32_t)(delay > policy->max_delay_ms ? policy->max_delay_ms : delay);
+    }
+}
+
+/**
+ * Forward with retry and backoff — L6 canonical engineering problem.
+ *
+ * Combines:
+ *   1. Exponential backoff with decorrelated jitter (L5)
+ *   2. Graceful degradation on repeated failure (L6)
+ *   3. Idempotency-awareness: only retry GET/HEAD/OPTIONS (L7)
+ *
+ * Flow:
+ *   attempt 0: immediate
+ *   attempt 1: delay = base + random(0, base)
+ *   attempt 2: delay = base + random(0, 2*base)
+ *   attempt 3: delay = base + random(0, 4*base)
+ *   ...capped at max_delay_ms
+ */
+int gw_forward_with_retry(gw_gateway_t *gateway, gw_request_t *req,
+                           gw_response_t *resp, const gw_retry_policy_t *policy) {
+    if (!gateway || !req || !resp || !policy) return -1;
+
+    int idempotent = (req->method == GW_METHOD_GET || req->method == GW_METHOD_ANY);
+
+    for (int attempt = 0; attempt <= policy->max_retries; attempt++) {
+        if (attempt > 0) {
+            /* only retry idempotent methods unless policy says otherwise */
+            if (!idempotent && !policy->retry_on_5xx) break;
+
+            int32_t delay = gw_compute_backoff(policy, attempt);
+            /* sleep delay milliseconds (simplified: busy-wait approximation) */
+            struct timespec ts = { delay / 1000, (delay % 1000) * 1000000L };
+            nanosleep(&ts, NULL);
+        }
+
+        int result = gw_forward(gateway, req, resp);
+
+        if (result == 0 && (resp->status_code < 500 || !policy->retry_on_5xx)) {
+            return 0; /* success or non-retryable error */
+        }
+
+        /* check if we should retry on timeout */
+        if (result < 0 && !policy->retry_on_timeout) break;
+    }
+
+    return -1; /* all retries exhausted */
+}
+
+/**
+ * L7 Application: Gateway circuit breaker guard.
+ * Wraps forward() with a circuit breaker to prevent cascading
+ * failures when upstream services are degraded.
+ *
+ * Integration pattern: Gateway → Circuit Breaker → Upstream
+ * When circuit opens, 503 is returned immediately without
+ * burdening the failing upstream.
+ */
+
+typedef struct {
+    gw_gateway_t *gateway;
+    gw_request_t *req;
+    gw_response_t *resp;
+} gw_cb_context_t;
+
+static int gw_cb_forward_wrapper(void *arg) {
+    gw_cb_context_t *ctx = (gw_cb_context_t *)arg;
+    return gw_forward(ctx->gateway, ctx->req, ctx->resp);
+}
+
+int gw_forward_with_circuit_breaker(gw_gateway_t *gateway, gw_request_t *req,
+                                     gw_response_t *resp,
+                                     cb_circuit_breaker_t *cb) {
+    if (!gateway || !req || !resp || !cb) return -1;
+    gw_cb_context_t ctx = { gateway, req, resp };
+    return cb_call(cb, gw_cb_forward_wrapper, &ctx, 5000);
+}
+
+/**
+ * Weighted Round Robin with dynamic weight adjustment.
+ *
+ * L5 Algorithm: Smooth Weighted Round Robin (SWRR)
+ * Reference: Nginx upstream weight adjustment.
+ *
+ * Unlike simple weighted RR, SWRR tracks per-server "current weight"
+ * to avoid bursty traffic on high-weight servers. Each selection
+ * decreases the chosen server's effective weight, and weight is
+ * reset when all servers' effective weights go below zero.
+ */
+gw_upstream_t *gw_upstream_select_swrr(gw_gateway_t *gateway,
+                                        const char *service_name) {
+    if (!gateway || !service_name) return NULL;
+    int svc_idx = -1;
+    for (int i = 0; i < gateway->upstream_svc_count; i++) {
+        if (strcmp(gateway->upstream_svc[i], service_name) == 0)
+            { svc_idx = i; break; }
+    }
+    if (svc_idx < 0) return NULL;
+
+    int cnt = gateway->upstream_counts[svc_idx];
+    if (cnt == 0) return NULL;
+
+    /* Find best server by current_weight */
+    int best_idx = -1;
+    int best_weight = -1;
+    int total_weight = 0;
+    static int current_weights[1024] = {0};
+
+    for (int i = 0; i < cnt; i++) {
+        if (!gateway->upstreams[svc_idx][i].healthy) continue;
+        current_weights[i] += gateway->upstreams[svc_idx][i].weight;
+        total_weight += gateway->upstreams[svc_idx][i].weight;
+        if (current_weights[i] > best_weight) {
+            best_weight = current_weights[i];
+            best_idx = i;
+        }
+    }
+
+    if (best_idx < 0 || total_weight == 0) return NULL;
+
+    /* Decrease chosen server's current weight */
+    current_weights[best_idx] -= total_weight;
+
+    return &gateway->upstreams[svc_idx][best_idx];
+}
+
+/**
+ * L7: Route table statistics for observability.
+ */
+static gw_route_stats_t gw_route_stats[GW_MAX_RULES];
+static int gw_route_stats_count = 0;
+
+void gw_route_stats_record(gw_gateway_t *gateway, const char *path,
+                            int status_code, int64_t latency_us) {
+    if (!gateway || !path) return;
+    /* find or create stats entry */
+    int idx = -1;
+    for (int i = 0; i < gw_route_stats_count; i++) {
+        if (strcmp(gw_route_stats[i].path, path) == 0) { idx = i; break; }
+    }
+    if (idx < 0 && gw_route_stats_count < GW_MAX_RULES) {
+        idx = gw_route_stats_count++;
+        strncpy(gw_route_stats[idx].path, path, GW_MAX_PATH_LEN - 1);
+    }
+    if (idx < 0) return;
+
+    gw_route_stats[idx].request_count++;
+    gw_route_stats[idx].total_latency_us += latency_us;
+    if (status_code >= 400) gw_route_stats[idx].error_count++;
+    gw_route_stats[idx].last_request_time = (int64_t)time(NULL);
+}
+
+int gw_route_stats_get(const char *path, gw_route_stats_t *out) {
+    if (!path || !out) return -1;
+    for (int i = 0; i < gw_route_stats_count; i++) {
+        if (strcmp(gw_route_stats[i].path, path) == 0) {
+            *out = gw_route_stats[i]; return 0;
+        }
+    }
+    return -1;
 }

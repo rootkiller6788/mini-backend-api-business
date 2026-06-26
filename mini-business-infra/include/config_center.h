@@ -110,6 +110,38 @@ int                 cc_group_list(cc_config_center_t *center, const char *namesp
 int                 cc_key_list(cc_config_center_t *center, const char *namespace_,
                                 const char *group_, char keys[][CC_MAX_KEY_LEN], int *count);
 
+/* === L4: CAP Theorem — Tunable Consistency === */
+typedef enum {
+    CC_CONSISTENCY_STRONG   = 0,
+    CC_CONSISTENCY_EVENTUAL = 1,
+    CC_CONSISTENCY_QUORUM   = 2
+} cc_consistency_level_t;
+
+typedef struct {
+    cc_consistency_level_t read_level;
+    cc_consistency_level_t write_level;
+    int                    quorum_n;
+    int                    quorum_r;
+    int                    quorum_w;
+    int                    read_repair_enabled;
+    int                    hint_enabled;
+} cc_consistency_config_t;
+
+int                 cc_config_get_consistent(cc_config_center_t *center, const char *namespace_,
+                                              const char *group_, const char *key,
+                                              cc_config_entry_t *entry,
+                                              const cc_consistency_config_t *cons);
+
+/* L7: Persistence */
+int                 cc_snapshot_save(cc_config_center_t *center, const char *filepath);
+int                 cc_snapshot_load(cc_config_center_t *center, const char *filepath);
+
+/* L8: Config drift detection */
+int                 cc_config_diff(cc_config_center_t *center,
+                                    const char *ns_a, const char *group_a,
+                                    const char *ns_b, const char *group_b,
+                                    char out_keys[][CC_MAX_KEY_LEN], int *count);
+
 #ifdef __cplusplus
 }
 #endif

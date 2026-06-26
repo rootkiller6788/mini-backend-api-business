@@ -5,22 +5,22 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#define OA_MAX_PATHS            64
-#define OA_MAX_SCHEMAS          64
-#define OA_MAX_OPERATIONS       128
-#define OA_MAX_PARAMETERS       16
-#define OA_MAX_RESPONSES        8
-#define OA_MAX_SECURITY_SCHEMES 8
-#define OA_MAX_TAGS             16
-#define OA_MAX_SERVERS          4
-#define OA_MAX_PROPERTIES       32
-#define OA_MAX_ENUM_VALUES      16
+#define OA_MAX_PATHS            16
+#define OA_MAX_SCHEMAS          8
+#define OA_MAX_OPERATIONS       16
+#define OA_MAX_PARAMETERS       4
+#define OA_MAX_RESPONSES        2
+#define OA_MAX_SECURITY_SCHEMES 4
+#define OA_MAX_TAGS             8
+#define OA_MAX_SERVERS          2
+#define OA_MAX_PROPERTIES       8
+#define OA_MAX_ENUM_VALUES      8
 #define OA_MAX_CONTENT_TYPES    4
 #define OA_NAME_LEN             128
-#define OA_DESC_LEN             512
+#define OA_DESC_LEN             256
 #define OA_URL_LEN              256
 #define OA_REF_LEN              256
-#define OA_EXAMPLE_LEN          1024
+#define OA_EXAMPLE_LEN          256
 #define OA_SPEC_BUF_LEN         65536
 
 typedef enum {
@@ -217,5 +217,12 @@ void oa_spec_merge(oa_spec_t* dst, oa_spec_t* src);
 
 oa_operation_t* oa_spec_find_operation(oa_spec_t* spec, const char* operation_id);
 oa_schema_t* oa_spec_find_schema(oa_spec_t* spec, const char* name);
+
+bool oa_spec_export_yaml(oa_spec_t* spec, char* buf, size_t len);
+bool oa_spec_export_yaml_schema(oa_schema_t* s, char* buf, size_t len);
+bool oa_validate_schema(oa_schema_t* s);
+bool oa_validate_operation(oa_operation_t* op);
+bool oa_operation_has_path_param(oa_operation_t* op, const char* param_name);
+int32_t oa_spec_path_count(oa_spec_t* spec);
 
 #endif

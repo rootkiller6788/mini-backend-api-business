@@ -98,6 +98,19 @@ int64_t         mq_queue_message_count(mq_broker_t *broker, const char *queue);
 void            mq_message_init(mq_message_t *msg);
 void            mq_message_free(mq_message_t *msg);
 
+/* L5: Priority-based consumption (binary heap) */
+int             mq_basic_consume_priority(mq_channel_t *ch, const char *queue,
+                                          int32_t *priorities, int msg_count,
+                                          mq_consume_callback cb, void *user_data);
+
+/* L7: Message deduplication */
+int             mq_basic_publish_dedup(mq_channel_t *ch, const char *exchange,
+                                       const char *routing_key, mq_message_t *msg);
+
+/* L8: AMQP topic pattern matching */
+int             mq_basic_publish_topic(mq_channel_t *ch, const char *exchange,
+                                       const char *routing_key, mq_message_t *msg);
+
 #ifdef __cplusplus
 }
 #endif

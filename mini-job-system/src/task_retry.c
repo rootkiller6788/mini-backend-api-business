@@ -88,7 +88,7 @@ static int should_retry_on(const tr_entry_t *entry, tr_error_code_t err)
     if (err == TR_ERR_NONE) return 0;
     if (entry->retry_on_count == 0) return 1;
     for (i = 0; i < entry->retry_on_count; i++)
-        if (entry->retry_on_codes[i] == err)
+        if (entry->retry_on_codes[i] == (int)err)
             return 1;
     return 0;
 }
@@ -107,7 +107,10 @@ uint64_t tr_calc_delay(int retry_count, uint64_t base_ms, int use_jitter,
     }
 
     if (use_jitter && seed) {
-        int jitter = (int)(((double)rand_r(seed) / (double)RAND_MAX)
+        /* Simple LCG (Linear Congruential Generator) for portability.
+         * Parameters from Numerical Recipes: a=1664525, c=1013904223, m=2^32 */
+        *seed = (*seed) * 1664525u + 1013904223u;
+        int jitter = (int)(((double)(*seed) / 4294967296.0)
                            * (double)TR_MAX_JITTER_MS * 2.0
                            - (double)TR_MAX_JITTER_MS);
         delay = (uint64_t)((int64_t)delay + (int64_t)jitter);
@@ -142,6 +145,7 @@ int tr_report_result(task_retry_t *tr, uint64_t job_id, tr_error_code_t err)
         return 0;
     }
 
+    entry->retry_count++;  /* Count this retry attempt */
     entry->current_delay_ms = tr_calc_delay(entry->retry_count,
                                              entry->base_delay_ms, 1,
                                              &tr->seed);
@@ -167,7 +171,6 @@ int tr_trigger_retry(task_retry_t *tr, uint64_t job_id, time_t now)
     if (tr->entries[idx].exhausted) return 0;
     if (tr->entries[idx].next_retry_at > now) return 0;
 
-    tr->entries[idx].retry_count++;
     tr->entries[idx].task(tr->entries[idx].userdata);
     return 1;
 }

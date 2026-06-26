@@ -5,9 +5,39 @@
 #include <stdarg.h>
 
 #define ORM_MAX_META 32
+#define ORM_MAX_ROWS_PER_TABLE 1024
+#define ORM_MAX_DATA_SIZE      4096
+
+/* L3: In-memory row store — each table has a ring buffer of row data */
+typedef struct {
+    char table[ORM_MAX_TABLE_NAME];
+    char data[ORM_MAX_ROWS_PER_TABLE][ORM_MAX_DATA_SIZE];
+    int  row_count;
+    int  pk_vals[ORM_MAX_ROWS_PER_TABLE]; /* primary key index */
+    int  pk_counter;
+} ORMTable;
 
 static ORMMeta g_meta_registry[ORM_MAX_META];
 static int     g_meta_count = 0;
+static ORMTable g_tables[ORM_MAX_META];
+static int      g_table_count = 0;
+
+/* Find or create table storage */
+static ORMTable *orm_table(const char *table_name) {
+    int i;
+    for (i = 0; i < g_table_count; i++) {
+        if (strcmp(g_tables[i].table, table_name) == 0)
+            return &g_tables[i];
+    }
+    if (g_table_count >= ORM_MAX_META) return NULL;
+    ORMTable *t = &g_tables[g_table_count];
+    strncpy(t->table, table_name, ORM_MAX_TABLE_NAME - 1);
+    t->table[ORM_MAX_TABLE_NAME - 1] = '\0';
+    t->row_count = 0;
+    t->pk_counter = 0;
+    g_table_count++;
+    return t;
+}
 
 static ORMMeta *orm_find_meta(const char *table_name) {
     int i;
@@ -91,44 +121,181 @@ int orm_define(const char *table_name, const ORMColumnDef *columns,
     return 0;
 }
 
-int orm_save(ORMModel *model, void *instance) {
-    ORMMeta *meta;
-    (void)instance;
+/*
+ * L5: In-memory CRUD operations using memcpy-based row storage.
+ * Complexity: O(n) for find/delete (linear scan), O(1) for save.
+ * This is a simplified implementation demonstrating the Active Record
+ * pattern without an actual SQL database backend.
+ *
+ * Reference: Fowler, "Patterns of Enterprise Application Architecture"
+ * (2002) Ch. 10 — Active Record.
+ */
 
-    if (!model) return -1;
-    meta = orm_find_meta(model->meta.table_name);
-    if (!meta) return -2;
+int orm_save(ORMModel *model, void *instance) {
+    ORMTable *table;
+    int pk_val;
+
+    if (!model || !instance) return -1;
+    table = orm_table(model->meta.table_name);
+    if (!table) return -2;
+    if (table->row_count >= ORM_MAX_ROWS_PER_TABLE) return -3;
+
+    /* Auto-increment primary key */
+    pk_val = ++table->pk_counter;
+    table->pk_vals[table->row_count] = pk_val;
+
+    /* Write instance data */
+    memcpy(table->data[table->row_count], instance, model->meta.struct_size);
+    table->row_count++;
 
     model->is_new = false;
     model->data   = instance;
 
-    return 0;
+    return pk_val;
 }
 
 int orm_find(ORMModel *model, int id) {
-    (void)model;
-    (void)id;
-    return 0;
+    ORMTable *table;
+    int i;
+
+    if (!model) return -1;
+    table = orm_table(model->meta.table_name);
+    if (!table) return -2;
+
+    for (i = 0; i < table->row_count; i++) {
+        if (table->pk_vals[i] == id) {
+            if (model->data) {
+                memcpy(model->data, table->data[i], model->meta.struct_size);
+            }
+            return id;
+        }
+    }
+    return -1;
 }
 
 int orm_find_by(ORMModel *model, const char *column, const char *value) {
-    (void)model;
-    (void)column;
-    (void)value;
-    return 0;
+    ORMTable *table;
+    ORMMeta *meta;
+    int i, col_idx = -1;
+
+    if (!model || !column || !value) return -1;
+    table = orm_table(model->meta.table_name);
+    if (!table) return -2;
+
+    /* Find column index */
+    meta = orm_find_meta(model->meta.table_name);
+    if (meta) {
+        for (i = 0; i < meta->column_count; i++) {
+            if (strcmp(meta->columns[i].name, column) == 0) {
+                col_idx = i;
+                break;
+            }
+        }
+    }
+    if (col_idx < 0) return -3;
+
+    /* Linear scan for matching row */
+    for (i = 0; i < table->row_count; i++) {
+        const char *row = table->data[i];
+        int offset = 0;
+
+        /* Calculate field offset based on column order */
+        /* Simplified: assumes columns are in struct order with standard sizes */
+        int j;
+        for (j = 0; j < col_idx; j++) {
+            switch (meta->columns[j].type) {
+            case ORM_TYPE_INT:   case ORM_TYPE_BOOL: offset += sizeof(int); break;
+            case ORM_TYPE_INT64: offset += sizeof(int64_t); break;
+            case ORM_TYPE_FLOAT: offset += sizeof(float); break;
+            case ORM_TYPE_DOUBLE: offset += sizeof(double); break;
+            case ORM_TYPE_STRING:
+            case ORM_TYPE_TEXT:  offset += meta->columns[j].length; break;
+            default: break;
+            }
+        }
+
+        if (meta->columns[col_idx].type == ORM_TYPE_STRING ||
+            meta->columns[col_idx].type == ORM_TYPE_TEXT) {
+            if (strcmp(row + offset, value) == 0) {
+                if (model->data) {
+                    memcpy(model->data, row, model->meta.struct_size);
+                }
+                return table->pk_vals[i];
+            }
+        }
+    }
+    return -1;
 }
 
 int orm_delete(ORMModel *model, int id) {
-    (void)model;
-    (void)id;
-    return 0;
+    ORMTable *table;
+    int i;
+
+    if (!model) return -1;
+    table = orm_table(model->meta.table_name);
+    if (!table) return -2;
+
+    for (i = 0; i < table->row_count; i++) {
+        if (table->pk_vals[i] == id) {
+            /* Shift remaining rows down */
+            int remaining = table->row_count - i - 1;
+            if (remaining > 0) {
+                memmove(table->data[i], table->data[i + 1],
+                        remaining * ORM_MAX_DATA_SIZE);
+                memmove(&table->pk_vals[i], &table->pk_vals[i + 1],
+                        remaining * sizeof(int));
+            }
+            table->row_count--;
+            return 0;
+        }
+    }
+    return -1;
 }
 
 int orm_delete_by(ORMModel *model, const char *column, const char *value) {
-    (void)model;
-    (void)column;
-    (void)value;
-    return 0;
+    ORMTable *table;
+    ORMMeta *meta;
+    int i, j, col_idx = -1;
+
+    if (!model || !column || !value) return -1;
+    table = orm_table(model->meta.table_name);
+    if (!table) return -2;
+
+    meta = orm_find_meta(model->meta.table_name);
+    if (meta) {
+        for (i = 0; i < meta->column_count; i++) {
+            if (strcmp(meta->columns[i].name, column) == 0) { col_idx = i; break; }
+        }
+    }
+    if (col_idx < 0) return -3;
+
+    for (i = 0; i < table->row_count; i++) {
+        const char *row = table->data[i];
+        int offset = 0;
+        for (j = 0; j < col_idx; j++) {
+            switch (meta->columns[j].type) {
+            case ORM_TYPE_INT: case ORM_TYPE_BOOL: offset += sizeof(int); break;
+            case ORM_TYPE_INT64: offset += sizeof(int64_t); break;
+            case ORM_TYPE_FLOAT: offset += sizeof(float); break;
+            case ORM_TYPE_DOUBLE: offset += sizeof(double); break;
+            case ORM_TYPE_STRING: case ORM_TYPE_TEXT: offset += meta->columns[j].length; break;
+            default: break;
+            }
+        }
+
+        if ((meta->columns[col_idx].type == ORM_TYPE_STRING ||
+             meta->columns[col_idx].type == ORM_TYPE_TEXT) &&
+            strcmp(row + offset, value) == 0) {
+            int remaining = table->row_count - i - 1;
+            if (remaining > 0) {
+                memmove(table->data[i], table->data[i + 1], remaining * ORM_MAX_DATA_SIZE);
+                memmove(&table->pk_vals[i], &table->pk_vals[i + 1], remaining * sizeof(int));
+            }
+            table->row_count--;
+            return 0;
+        }
+    }
+    return -1;
 }
 
 void orm_query_init(ORMQuery *q, const char *table) {

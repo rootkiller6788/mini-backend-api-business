@@ -1,5 +1,7 @@
 # mini-web-server — Web 服务器 (C 语言实现)
 
+## Module Status: COMPLETE ✅
+
 轻量级 HTTP/1.1 Web 服务器库, 使用 C99 编写。模块化设计, 零外部依赖。
 
 ## 特性

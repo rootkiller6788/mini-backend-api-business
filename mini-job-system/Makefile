@@ -5,11 +5,7 @@ CC      = gcc
 CFLAGS  = -std=c99 -Wall -Wextra -O2 -Iinclude
 LDFLAGS =
 
-ifeq ($(OS),Windows_NT)
-    LDFLAGS += -lwinmm
-else
-    LDFLAGS += -lpthread -lrt
-endif
+LDFLAGS += -lpthread
 
 SRC_DIR   = src
 INC_DIR   = include
@@ -29,7 +25,7 @@ DEMOS    = $(DEMO_DIR)/demo_system \
 
 LIBS     = $(BUILD_DIR)/libminijob.a
 
-.PHONY: all clean examples demos lib
+.PHONY: all clean examples demos lib test
 .PHONY: run-example-basic run-example-cron run-example-retry
 .PHONY: run-demo-system run-demo-advanced
 
@@ -82,8 +78,35 @@ run-demo-advanced: $(DEMO_DIR)/demo_advanced
 
 clean:
 	rm -rf $(BUILD_DIR)
-	rm -f $(EXAMPLES) $(DEMOS)
+	rm -f $(EXAMPLES) $(DEMOS) $(TEST_BINS)
 	rm -f $(EXAMPLES:%=%.exe) $(DEMOS:%=%.exe)
+
+# === Test targets ===
+
+TEST_DIR   = tests
+TEST_SRCS  = $(wildcard $(TEST_DIR)/test_*.c)
+TEST_BINS  = $(TEST_SRCS:$(TEST_DIR)/%.c=$(BUILD_DIR)/%)
+
+$(BUILD_DIR)/test_%: $(TEST_DIR)/test_%.c $(LIBS)
+	$(CC) $(CFLAGS) $< -L$(BUILD_DIR) -lminijob $(LDFLAGS) -o $@
+
+test: $(TEST_BINS)
+	@echo "========================================="
+	@echo "  Running mini-job-system tests"
+	@echo "========================================="
+	@FAILED=0; \
+	for t in $(sort $(TEST_BINS)); do \
+		./$$t; \
+		if [ $$? -ne 0 ]; then FAILED=$$((FAILED+1)); fi; \
+	done; \
+	echo "========================================="; \
+	echo "  Test suites: $$(echo $(TEST_BINS) | wc -w)"; \
+	if [ $$FAILED -eq 0 ]; then \
+		echo "  ALL TESTS PASSED"; \
+	else \
+		echo "  FAILED: $$FAILED suite(s)"; \
+		exit 1; \
+	fi
 
 help:
 	@echo "Targets:"
@@ -91,6 +114,7 @@ help:
 	@echo "  lib                  - Build static library libminijob.a"
 	@echo "  examples             - Build all example programs"
 	@echo "  demos                - Build all demo programs"
+	@echo "  test                 - Build and run all tests"
 	@echo "  clean                - Remove build artifacts"
 	@echo "  run-example-basic    - Run basic example"
 	@echo "  run-example-cron     - Run cron example"

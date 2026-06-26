@@ -200,10 +200,17 @@ int mvc_view_render(MVCView *view) {
 
             char varname[MVC_MAX_VAR_NAME];
             int vn = 0;
+            /* Read variable name until } or end-of-string */
             while (*src && *src != '}' && vn < MVC_MAX_VAR_NAME - 1) {
                 varname[vn++] = *src++;
             }
             varname[vn] = '\0';
+
+            /* Strip trailing spaces from variable name */
+            while (vn > 0 && varname[vn - 1] == ' ') {
+                vn--;
+                varname[vn] = '\0';
+            }
 
             while (*src == ' ' || *src == '}') src++;
             if (*src == '}') src++;

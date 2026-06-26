@@ -101,4 +101,30 @@ char* av_build_sunset_header(av_deprecation_t* dep, char* buf, size_t len);
 char* av_build_deprecation_header(av_deprecation_t* dep, char* buf, size_t len);
 char* av_build_version_uri(av_router_t* r, const char* version_str, const char* resource, char* buf, size_t len);
 
+bool av_version_is_prerelease(av_version_t v);
+bool av_version_has_major_change(av_version_t a, av_version_t b);
+bool av_version_has_minor_change(av_version_t a, av_version_t b);
+bool av_version_is_backward_compatible(av_version_t a, av_version_t b);
+
+typedef enum {
+    AV_RANGE_CARET   = 0,
+    AV_RANGE_TILDE   = 1,
+    AV_RANGE_GTE     = 2,
+    AV_RANGE_EQ      = 3,
+    AV_RANGE_WILDCARD= 4,
+    AV_RANGE_HYPHEN  = 5
+} av_range_type_t;
+
+typedef struct {
+    av_range_type_t type;
+    av_version_t    lower;
+    av_version_t    upper;
+    bool            has_upper;
+} av_version_range_t;
+
+bool av_range_parse(const char* str, av_version_range_t* range);
+bool av_range_satisfies(av_version_range_t* range, av_version_t version);
+
+char* av_changelog_render(av_router_t* r, char* buf, size_t len);
+
 #endif

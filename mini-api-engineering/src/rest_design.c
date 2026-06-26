@@ -1,6 +1,8 @@
 #include "rest_design.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
 
 const char* rest_method_string(rest_method_t method) {
     static const char* names[] = {
@@ -143,16 +145,333 @@ void rest_router_init(rest_router_t* r, const char* base_path, int32_t version) 
     r->base_path[sizeof(r->base_path) - 1] = '\0';
     r->version = version;
     snprintf(r->uri, sizeof(r->uri), "%s/v%d", base_path, version);
+    r->rate_limit_rate = 100.0;
+    r->rate_limit_capacity = 200.0;
+    r->rate_limit_tokens = r->rate_limit_capacity;
+    r->rate_limit_last_refill = (double)time(NULL);
 }
 
-void rest_router_register(rest_router_t* r, rest_resource_t* resource) {
-    (void)r;
-    (void)resource;
+bool rest_router_register(rest_router_t* r, rest_resource_t* resource) {
+    if (!r || !resource) return false;
+    if (r->route_count >= REST_MAX_ROUTES) return false;
+    r->routes[r->route_count++] = resource;
+    return true;
 }
 
-const char* rest_router_resolve(rest_router_t* r, const char* uri, rest_method_t method) {
-    (void)r;
-    (void)uri;
-    (void)method;
-    return NULL;
+rest_resource_t* rest_router_resolve(rest_router_t* r, const char* uri, rest_method_t method) {
+    if (!r || !uri) return NULL;
+    rest_resource_t* best = NULL;
+    int32_t best_score = -1;
+
+    for (int32_t i = 0; i < r->route_count; i++) {
+        rest_resource_t* res = r->routes[i];
+        if (res->method != method) continue;
+
+        const char* rpath = res->path;
+        const char* upath = uri;
+        int32_t score = 0;
+        bool match = true;
+
+        while (*rpath && *upath && match) {
+            if (*rpath == '{') {
+                while (*rpath && *rpath != '}') rpath++;
+                if (*rpath == '}') rpath++;
+                while (*upath && *upath != '/') upath++;
+                score += 2;
+            } else if (*rpath == *upath) {
+                rpath++;
+                upath++;
+                score += 1;
+            } else {
+                match = false;
+            }
+        }
+        if (*rpath == '\0' && *upath == '\0') match = true;
+        else if (*rpath == '/' && *rpath && (*upath == '/' || *upath == '\0')) match = true;
+        else if (*rpath == '\0' && *upath == '/') match = true;
+        else if (*rpath == '/' && *(rpath+1) == '\0' && *upath == '\0') match = true;
+        else match = false;
+
+        if (match && score > best_score) {
+            best_score = score;
+            best = res;
+        }
+    }
+    return best;
+}
+
+void rest_router_set_cors(rest_router_t* r, const char* origin, bool credentials,
+                           const char* methods, const char* headers, int32_t max_age) {
+    if (!r) return;
+    strncpy(r->cors.origin, origin ? origin : "*", sizeof(r->cors.origin) - 1);
+    r->cors.allow_credentials = credentials;
+    if (methods) strncpy(r->cors.allowed_methods, methods, sizeof(r->cors.allowed_methods) - 1);
+    if (headers) strncpy(r->cors.allowed_headers, headers, sizeof(r->cors.allowed_headers) - 1);
+    r->cors.max_age = max_age;
+}
+
+void rest_router_set_rate_limit(rest_router_t* r, double rate, double capacity) {
+    if (!r) return;
+    r->rate_limit_rate = rate;
+    r->rate_limit_capacity = capacity;
+    r->rate_limit_tokens = capacity;
+    r->rate_limit_last_refill = (double)time(NULL);
+}
+
+bool rest_router_check_rate_limit(rest_router_t* r) {
+    if (!r) return false;
+    if (r->rate_limit_rate <= 0.0) return true;
+
+    double now = (double)time(NULL);
+    double elapsed = now - r->rate_limit_last_refill;
+    r->rate_limit_tokens += elapsed * r->rate_limit_rate;
+    if (r->rate_limit_tokens > r->rate_limit_capacity)
+        r->rate_limit_tokens = r->rate_limit_capacity;
+    r->rate_limit_last_refill = now;
+
+    if (r->rate_limit_tokens >= 1.0) {
+        r->rate_limit_tokens -= 1.0;
+        return true;
+    }
+    return false;
+}
+
+static uint32_t rest_djb2_hash(const char* str, int32_t len) {
+    uint32_t hash = 5381;
+    for (int32_t i = 0; i < len; i++)
+        hash = ((hash << 5) + hash) + (unsigned char)str[i];
+    return hash;
+}
+
+rest_etag_t rest_etag_strong(const char* body, int32_t len) {
+    rest_etag_t etag = { .value = "", .is_weak = false };
+    if (!body || len <= 0) return etag;
+    uint32_t h = rest_djb2_hash(body, len);
+    snprintf(etag.value, sizeof(etag.value), "\"%08x-%d\"", h, len);
+    return etag;
+}
+
+rest_etag_t rest_etag_weak(const char* body, int32_t len) {
+    rest_etag_t etag = rest_etag_strong(body, len);
+    if (etag.value[0] == '"') {
+        char tmp[REST_ETAG_LEN];
+        snprintf(tmp, sizeof(tmp), "W/%s", etag.value);
+        strncpy(etag.value, tmp, sizeof(etag.value) - 1);
+    }
+    etag.is_weak = true;
+    return etag;
+}
+
+bool rest_etag_match(rest_etag_t server_etag, const char* if_none_match) {
+    if (!if_none_match || server_etag.value[0] == '\0') return false;
+    if (strcmp(if_none_match, "*") == 0) return true;
+
+    const char* p = if_none_match;
+    while (*p) {
+        while (*p == ' ' || *p == ',') p++;
+        bool weak = false;
+        if (strncmp(p, "W/", 2) == 0) { weak = true; p += 2; }
+
+        char tag[REST_ETAG_LEN] = {0};
+        int32_t k = 0;
+        bool quoted = false;
+        if (*p == '"') { quoted = true; p++; }
+        while (*p && *p != ',' && k < REST_ETAG_LEN - 1) {
+            if (quoted && *p == '"') { p++; break; }
+            tag[k++] = *p++;
+        }
+        tag[k] = '\0';
+
+        if (weak || server_etag.is_weak) {
+            if (strcmp(server_etag.value + (server_etag.is_weak ? 2 : 0),
+                       tag) == 0) return true;
+        } else {
+            char tmp[REST_ETAG_LEN];
+            snprintf(tmp, sizeof(tmp), "\"%s\"", tag);
+            if (strcmp(server_etag.value, tmp) == 0) return true;
+        }
+    }
+    return false;
+}
+
+int rest_etag_compare(rest_etag_t a, rest_etag_t b) {
+    return strcmp(a.value, b.value);
+}
+
+const char* rest_media_type_to_mime(rest_media_type_t t) {
+    static const char* mimes[] = {
+        "application/json",
+        "application/xml",
+        "application/x-www-form-urlencoded",
+        "multipart/form-data",
+        "text/plain",
+        "text/html",
+        "application/octet-stream",
+        "application/protobuf",
+        "*/*"
+    };
+    if (t > REST_MEDIA_ANY) return "unknown";
+    return mimes[t];
+}
+
+rest_media_range_t rest_parse_media_range(const char* accept_entry) {
+    rest_media_range_t range = { .type = "", .subtype = "", .quality = 1.0, .level = 0 };
+    if (!accept_entry) return range;
+
+    const char* p = accept_entry;
+    while (*p == ' ') p++;
+
+    const char* ts = p;
+    while (*p && *p != '/') p++;
+    size_t tn = (size_t)(p - ts);
+    if (tn >= sizeof(range.type)) tn = sizeof(range.type) - 1;
+    memcpy(range.type, ts, tn);
+    range.type[tn] = '\0';
+    if (*p == '/') p++;
+
+    const char* ss = p;
+    while (*p && *p != ';' && *p != ',' && *p != ' ') p++;
+    size_t sn = (size_t)(p - ss);
+    if (sn >= sizeof(range.subtype)) sn = sizeof(range.subtype) - 1;
+    memcpy(range.subtype, ss, sn);
+    range.subtype[sn] = '\0';
+
+    while (*p) {
+        while (*p == ' ' || *p == ';') p++;
+        if (strncmp(p, "q=", 2) == 0) {
+            p += 2;
+            range.quality = atof(p);
+            while (*p && *p != ',' && *p != ';') p++;
+        } else if (strncmp(p, "level=", 6) == 0) {
+            p += 6;
+            range.level = atoi(p);
+            while (*p && *p != ',' && *p != ';') p++;
+        } else {
+            while (*p && *p != ',' && *p != ';') p++;
+        }
+    }
+    return range;
+}
+
+static int rest_media_type_specificity(rest_media_type_t t) {
+    switch (t) {
+        case REST_MEDIA_JSON:         return 8;
+        case REST_MEDIA_XML:          return 7;
+        case REST_MEDIA_PROTOBUF:     return 6;
+        case REST_MEDIA_MULTIPART:    return 5;
+        case REST_MEDIA_FORM:         return 4;
+        case REST_MEDIA_TEXT_HTML:    return 3;
+        case REST_MEDIA_TEXT_PLAIN:   return 2;
+        case REST_MEDIA_OCTET_STREAM: return 1;
+        case REST_MEDIA_ANY:          return 0;
+        default:                      return 0;
+    }
+}
+
+rest_media_type_t rest_negotiate_content_type(const char* accept_header,
+                                               const rest_media_type_t* supported, int32_t count) {
+    if (!accept_header || !supported || count <= 0) {
+        return count > 0 ? supported[0] : REST_MEDIA_JSON;
+    }
+    if (strcmp(accept_header, "*/*") == 0) return supported[0];
+
+    rest_media_type_t best = supported[0];
+    double best_q = -1.0;
+    int best_spec = -1;
+
+    char header_copy[1024];
+    strncpy(header_copy, accept_header, sizeof(header_copy) - 1);
+    header_copy[sizeof(header_copy) - 1] = '\0';
+
+    char* token = strtok(header_copy, ",");
+    while (token) {
+        rest_media_range_t range = rest_parse_media_range(token);
+
+        for (int32_t i = 0; i < count; i++) {
+            const char* mime = rest_media_type_to_mime(supported[i]);
+            char mime_type[64], mime_sub[64];
+            const char* mp = mime;
+            const char* ms = mp;
+            while (*mp && *mp != '/') mp++;
+            size_t mtn = (size_t)(mp - ms);
+            if (mtn >= sizeof(mime_type)) mtn = sizeof(mime_type) - 1;
+            memcpy(mime_type, ms, mtn);
+            mime_type[mtn] = '\0';
+            if (*mp == '/') mp++;
+            strncpy(mime_sub, mp, sizeof(mime_sub) - 1);
+
+            bool type_match = (strcmp(range.type, "*") == 0 || strcmp(range.type, mime_type) == 0);
+            bool sub_match = (strcmp(range.subtype, "*") == 0 || strcmp(range.subtype, mime_sub) == 0);
+
+            if (type_match && sub_match) {
+                int spec = rest_media_type_specificity(supported[i]);
+                if (range.quality > best_q ||
+                    (range.quality == best_q && spec > best_spec)) {
+                    best_q = range.quality;
+                    best_spec = spec;
+                    best = supported[i];
+                }
+            }
+        }
+        token = strtok(NULL, ",");
+    }
+
+    return (best_q > 0.0) ? best : supported[0];
+}
+
+char* rest_build_cors_headers(rest_cors_policy_t* policy, const char* origin,
+                               char* buf, size_t len) {
+    if (!policy || !buf) return NULL;
+    int off = snprintf(buf, len,
+        "Access-Control-Allow-Origin: %s\r\n"
+        "Access-Control-Allow-Credentials: %s\r\n",
+        policy->origin[0] ? policy->origin : (origin ? origin : "*"),
+        policy->allow_credentials ? "true" : "false");
+    if (policy->allowed_methods[0])
+        off += snprintf(buf + off, len - off, "Access-Control-Allow-Methods: %s\r\n",
+                        policy->allowed_methods);
+    if (policy->allowed_headers[0])
+        off += snprintf(buf + off, len - off, "Access-Control-Allow-Headers: %s\r\n",
+                        policy->allowed_headers);
+    if (policy->max_age > 0)
+        off += snprintf(buf + off, len - off, "Access-Control-Max-Age: %d\r\n",
+                        policy->max_age);
+    return buf;
+}
+
+char* rest_build_cache_headers(rest_etag_t etag, int32_t max_age, rest_cache_control_t cc,
+                                char* buf, size_t len) {
+    if (!buf) return NULL;
+    int off = 0;
+    if (etag.value[0])
+        off += snprintf(buf + off, len - off, "ETag: %s\r\n", etag.value);
+    if (max_age > 0) {
+        const char* cc_str = "public";
+        if (cc == REST_CACHE_PRIVATE) cc_str = "private";
+        else if (cc == REST_CACHE_NO_STORE) cc_str = "no-store";
+        else if (cc == REST_CACHE_NO_CACHE) cc_str = "no-cache";
+        off += snprintf(buf + off, len - off, "Cache-Control: %s, max-age=%d\r\n",
+                        cc_str, max_age);
+    }
+    return buf;
+}
+
+bool rest_is_safe_method(rest_method_t m) {
+    return m == REST_GET || m == REST_HEAD || m == REST_OPTIONS;
+}
+
+bool rest_is_idempotent_method(rest_method_t m) {
+    return rest_is_safe_method(m) || m == REST_PUT || m == REST_DELETE;
+}
+
+bool rest_is_status_success(rest_status_t s) {
+    return (int)s >= 200 && (int)s < 300;
+}
+
+bool rest_is_status_client_error(rest_status_t s) {
+    return (int)s >= 400 && (int)s < 500;
+}
+
+bool rest_is_status_server_error(rest_status_t s) {
+    return (int)s >= 500 && (int)s < 600;
 }

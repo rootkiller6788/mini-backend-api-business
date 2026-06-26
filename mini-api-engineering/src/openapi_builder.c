@@ -109,12 +109,22 @@ void oa_operation_add_tag(oa_operation_t* op, const char* tag) {
 
 void oa_operation_add_param(oa_operation_t* op, const char* name, oa_param_in_t in,
                              oa_type_t type, bool required, const char* description) {
-    (void)op;
-    (void)name;
-    (void)in;
-    (void)type;
-    (void)required;
-    (void)description;
+    if (!op || op->param_count >= OA_MAX_PARAMETERS || !name) return;
+
+    static oa_parameter_t param_pool[OA_MAX_OPERATIONS * OA_MAX_PARAMETERS];
+    static int32_t pool_idx = 0;
+
+    oa_parameter_t* p = &param_pool[pool_idx];
+    pool_idx = (pool_idx + 1) % (OA_MAX_OPERATIONS * OA_MAX_PARAMETERS);
+
+    memset(p, 0, sizeof(*p));
+    strncpy(p->name, name, sizeof(p->name) - 1);
+    p->in = in;
+    p->required = required;
+    p->schema.type = type;
+    if (description) strncpy(p->description, description, sizeof(p->description) - 1);
+
+    op->parameters[op->param_count++] = p;
 }
 
 void oa_operation_add_response(oa_operation_t* op, const char* status_code, const char* description,
@@ -371,4 +381,118 @@ oa_schema_t* oa_spec_find_schema(oa_spec_t* spec, const char* name) {
         if (strcmp(spec->schemas[i].name, name) == 0) return &spec->schemas[i];
     }
     return NULL;
+}
+
+bool oa_spec_export_yaml(oa_spec_t* spec, char* buf, size_t len) {
+    if (!spec || !buf) return false;
+    int off = snprintf(buf, len,
+        "openapi: \"3.0.3\"\n"
+        "info:\n"
+        "  title: %s\n"
+        "  version: %s\n", spec->title, spec->version);
+    if (spec->description[0])
+        off += snprintf(buf + off, len - off, "  description: \"%s\"\n", spec->description);
+
+    if (spec->server_count > 0) {
+        off += snprintf(buf + off, len - off, "servers:\n");
+        for (int32_t i = 0; i < spec->server_count; i++)
+            off += snprintf(buf + off, len - off, "  - url: %s\n", spec->servers[i].url);
+    }
+
+    if (spec->op_count > 0) {
+        off += snprintf(buf + off, len - off, "paths:\n");
+        for (int32_t i = 0; i < spec->op_count; i++) {
+            oa_operation_t* op = &spec->operations[i];
+            off += snprintf(buf + off, len - off, "  %s:\n", op->path);
+            off += snprintf(buf + off, len - off, "    %s:\n", oa_method_string(op->method));
+            off += snprintf(buf + off, len - off, "      operationId: %s\n", op->operation_id);
+            if (op->summary[0])
+                off += snprintf(buf + off, len - off, "      summary: \"%s\"\n", op->summary);
+            if (op->deprecated)
+                off += snprintf(buf + off, len - off, "      deprecated: true\n");
+            if (op->response_count > 0) {
+                off += snprintf(buf + off, len - off, "      responses:\n");
+                for (int32_t j = 0; j < op->response_count; j++)
+                    off += snprintf(buf + off, len - off, "        \"%s\":\n          description: \"%s\"\n",
+                                    op->responses[j].status_code, op->responses[j].description);
+            }
+            if (op->tag_count > 0) {
+                off += snprintf(buf + off, len - off, "      tags:\n");
+                for (int32_t j = 0; j < op->tag_count; j++)
+                    off += snprintf(buf + off, len - off, "        - %s\n", op->tags[j]);
+            }
+        }
+    }
+    return true;
+}
+
+bool oa_spec_export_yaml_schema(oa_schema_t* s, char* buf, size_t len) {
+    if (!s || !buf) return false;
+    int off = snprintf(buf, len, "%s:\n  type: %s\n", s->name, oa_type_string(s->type));
+    if (s->description[0])
+        off += snprintf(buf + off, len - off, "  description: \"%s\"\n", s->description);
+    if (s->prop_count > 0) {
+        off += snprintf(buf + off, len - off, "  properties:\n");
+        for (int32_t i = 0; i < s->prop_count; i++) {
+            oa_property_t* p = &s->properties[i];
+            off += snprintf(buf + off, len - off, "    %s:\n      type: %s\n",
+                            p->name, oa_type_string(p->type));
+            if (p->format[0])
+                off += snprintf(buf + off, len - off, "      format: %s\n", p->format);
+            if (p->description[0])
+                off += snprintf(buf + off, len - off, "      description: \"%s\"\n", p->description);
+        }
+    }
+    if (s->enum_count > 0) {
+        off += snprintf(buf + off, len - off, "  enum:\n");
+        for (int32_t i = 0; i < s->enum_count; i++)
+            off += snprintf(buf + off, len - off, "    - %s\n", s->enum_values[i]);
+    }
+    return true;
+}
+
+bool oa_validate_schema(oa_schema_t* s) {
+    if (!s) return false;
+    if (strlen(s->name) == 0) return false;
+    if (s->type > OA_OBJECT) return false;
+    for (int32_t i = 0; i < s->prop_count; i++) {
+        if (strlen(s->properties[i].name) == 0) return false;
+    }
+    return true;
+}
+
+bool oa_validate_operation(oa_operation_t* op) {
+    if (!op) return false;
+    if (strlen(op->operation_id) == 0) return false;
+    if (strlen(op->path) == 0) return false;
+    if (op->method > OA_TRACE) return false;
+    return true;
+}
+
+bool oa_operation_has_path_param(oa_operation_t* op, const char* param_name) {
+    if (!op || !param_name) return false;
+    for (int32_t i = 0; i < op->param_count; i++) {
+        if (op->parameters[i] && strcmp(op->parameters[i]->name, param_name) == 0)
+            return true;
+    }
+    return false;
+}
+
+int32_t oa_spec_path_count(oa_spec_t* spec) {
+    if (!spec) return 0;
+    char seen[OA_MAX_OPERATIONS][OA_URL_LEN] = {0};
+    int32_t unique = 0;
+    for (int32_t i = 0; i < spec->op_count; i++) {
+        bool dup = false;
+        for (int32_t j = 0; j < unique; j++) {
+            if (strcmp(seen[j], spec->operations[i].path) == 0) {
+                dup = true;
+                break;
+            }
+        }
+        if (!dup && unique < OA_MAX_OPERATIONS) {
+            strncpy(seen[unique++], spec->operations[i].path, OA_URL_LEN - 1);
+        }
+    }
+    return unique;
 }

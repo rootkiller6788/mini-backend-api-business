@@ -117,7 +117,7 @@ const char *jwt_alg_name(JwtAlgorithm alg) {
 void jwt_engine_init(JwtEngine *eng, JwtAlgorithm alg,
                      const uint8_t *secret, size_t secret_len) {
     memset(eng, 0, sizeof(*eng));
-    eng->algorithm = alg;
+    eng->key.algorithm = alg;
     if (secret && secret_len <= JWT_MAX_SECRET_LEN) {
         memcpy(eng->key.secret, secret, secret_len);
         eng->key.secret_len = secret_len;
@@ -192,7 +192,7 @@ int jwt_encode(JwtEngine *eng, const JwtClaims *claims,
     int hdr_len, pl_len;
 
     hdr_len = snprintf(header_json, sizeof(header_json),
-                       "{\"alg\":\"%s\",\"typ\":\"JWT\"}", jwt_alg_name(eng->algorithm));
+                       "{\"alg\":\"%s\",\"typ\":\"JWT\"}", jwt_alg_name(eng->key.algorithm));
     if (hdr_len < 0) return -1;
 
     pl_len = (int)build_claims_json(claims, payload_json, sizeof(payload_json));
@@ -254,8 +254,6 @@ int jwt_decode(JwtEngine *eng, const char *token,
     uint8_t payload_json[JWT_MAX_PAYLOAD_LEN];
     size_t header_len = sizeof(header_json), payload_len = sizeof(payload_json);
     char signing_input[JWT_MAX_TOKEN_LEN];
-    uint8_t expected_sig[128];
-    size_t expected_sig_len = sizeof(expected_sig);
     char *saveptr;
 
     if (strlen(token) >= JWT_MAX_TOKEN_LEN) return -1;

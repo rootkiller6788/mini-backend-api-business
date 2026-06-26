@@ -137,7 +137,6 @@ bool av_router_parse_request(av_router_t* r, av_request_t* req, const char* uri,
     memset(req, 0, sizeof(*req));
     strncpy(req->uri, uri, sizeof(req->uri) - 1);
 
-    const char* path_start = strchr(uri, '/');
     av_version_strategy_t strategy = r->default_strategy;
 
     if (strategy == AV_URI_PATH) {
@@ -178,7 +177,6 @@ bool av_router_parse_request(av_router_t* r, av_request_t* req, const char* uri,
         req->is_valid = true;
     }
 
-    (void)path_start;
     return req->is_valid;
 }
 
@@ -202,8 +200,14 @@ const av_deprecation_t* av_router_check_deprecation(av_router_t* r, av_request_t
 }
 
 bool av_router_is_sunset(av_router_t* r, av_request_t* req) {
-    const av_deprecation_t* d = av_router_check_deprecation(r, req);
-    return d && d->level == AV_SUNSET;
+    if (!r || !req) return false;
+    for (int32_t i = 0; i < r->deprecation_count; i++) {
+        if (av_version_compare(req->version, r->deprecations[i].version) == 0 &&
+            r->deprecations[i].level == AV_SUNSET) {
+            return true;
+        }
+    }
+    return false;
 }
 
 char* av_build_sunset_header(av_deprecation_t* dep, char* buf, size_t len) {
@@ -231,5 +235,128 @@ char* av_build_version_uri(av_router_t* r, const char* version_str, const char* 
         snprintf(buf, len, "%s/%s?v=%s",
                  r->base_path, resource ? resource : "", version_str ? version_str : "1");
     }
+    return buf;
+}
+
+bool av_version_is_prerelease(av_version_t v) {
+    return v.is_prerelease;
+}
+
+bool av_version_has_major_change(av_version_t a, av_version_t b) {
+    return a.major != b.major;
+}
+
+bool av_version_has_minor_change(av_version_t a, av_version_t b) {
+    return a.major == b.major && a.minor != b.minor;
+}
+
+bool av_version_is_backward_compatible(av_version_t a, av_version_t b) {
+    if (a.major == 0) {
+        return a.major == b.major && a.minor == b.minor;
+    }
+    return a.major == b.major && a.minor <= b.minor;
+}
+
+bool av_range_parse(const char* str, av_version_range_t* range) {
+    if (!str || !range) return false;
+    memset(range, 0, sizeof(*range));
+
+    const char* p = str;
+    while (*p == ' ' || *p == 'v' || *p == 'V') p++;
+
+    if (*p == '^') {
+        range->type = AV_RANGE_CARET;
+        p++;
+        av_version_parse(&range->lower, p);
+        range->upper = range->lower;
+        if (range->lower.major > 0) {
+            range->upper.major = range->lower.major + 1;
+            range->upper.minor = 0;
+            range->upper.patch = 0;
+            range->upper.is_prerelease = false;
+        } else if (range->lower.minor > 0) {
+            range->upper.minor = range->lower.minor + 1;
+            range->upper.patch = 0;
+        } else {
+            range->upper.patch = range->lower.patch + 1;
+        }
+        range->has_upper = true;
+        return true;
+    }
+
+    if (*p == '~') {
+        range->type = AV_RANGE_TILDE;
+        p++;
+        av_version_parse(&range->lower, p);
+        range->upper = range->lower;
+        range->upper.minor = range->lower.minor + 1;
+        range->upper.patch = 0;
+        range->upper.is_prerelease = false;
+        range->has_upper = true;
+        return true;
+    }
+
+    if (*p == '>') {
+        p++;
+        if (*p == '=') p++;
+        range->type = AV_RANGE_GTE;
+        av_version_parse(&range->lower, p);
+        range->has_upper = false;
+        return true;
+    }
+
+    if (*p == '=') p++;
+    range->type = AV_RANGE_EQ;
+    av_version_parse(&range->lower, p);
+    range->upper = range->lower;
+    range->has_upper = true;
+    return true;
+}
+
+bool av_range_satisfies(av_version_range_t* range, av_version_t version) {
+    if (!range) return false;
+    int cmp_lower = av_version_compare(version, range->lower);
+    if (cmp_lower < 0) return false;
+    if (range->has_upper) {
+        int cmp_upper = av_version_compare(version, range->upper);
+        if (cmp_upper >= 0) return false;
+    }
+    return true;
+}
+
+char* av_changelog_render(av_router_t* r, char* buf, size_t len) {
+    if (!r || !buf) return NULL;
+    int off = snprintf(buf, len, "# API Changelog\n\n");
+    if (r->version_count == 0) {
+        off += snprintf(buf + off, len - off, "No versions registered.\n");
+        return buf;
+    }
+
+    for (int32_t i = r->deprecation_count - 1; i >= 0; i--) {
+        av_deprecation_t* d = &r->deprecations[i];
+        av_version_t v = d->version;
+        char vstr[32];
+        av_version_format(v, vstr, sizeof(vstr));
+        off += snprintf(buf + off, len - off, "## %s — %s %s\n",
+                        vstr,
+                        av_deprecation_level_string(d->level),
+                        d->level == AV_SUNSET ? "SUNSET" : "DEPRECATED");
+        if (d->deprecation_date[0])
+            off += snprintf(buf + off, len - off, "- **Date**: %s\n", d->deprecation_date);
+        if (d->sunset_date[0])
+            off += snprintf(buf + off, len - off, "- **Sunset**: %s\n", d->sunset_date);
+        if (d->message[0])
+            off += snprintf(buf + off, len - off, "- **Details**: %s\n", d->message);
+        if (d->alternative[0])
+            off += snprintf(buf + off, len - off, "- **Alternative**: %s\n", d->alternative);
+        off += snprintf(buf + off, len - off, "\n");
+    }
+
+    if (r->current_version.major > 0) {
+        char cur[32];
+        av_version_format(r->current_version, cur, sizeof(cur));
+        off += snprintf(buf + off, len - off, "## Current: %s\n\n", cur);
+    }
+
     return buf;
 }

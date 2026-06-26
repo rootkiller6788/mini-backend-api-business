@@ -91,7 +91,7 @@ static OAuth2AuthCode *oauth2_find_auth_code(OAuth2Server *srv, const char *code
     return NULL;
 }
 
-static OAuth2TokenEntry *oauth2_find_access_token(const OAuth2Server *srv,
+static OAuth2TokenEntry *oauth2_find_access_token(OAuth2Server *srv,
                                                    const char *access_token) {
     size_t i;
     for (i = 0; i < srv->token_count; i++) {
@@ -100,7 +100,7 @@ static OAuth2TokenEntry *oauth2_find_access_token(const OAuth2Server *srv,
     return NULL;
 }
 
-static OAuth2TokenEntry *oauth2_find_refresh_token(const OAuth2Server *srv,
+static OAuth2TokenEntry *oauth2_find_refresh_token(OAuth2Server *srv,
                                                     const char *refresh_token) {
     size_t i;
     for (i = 0; i < srv->token_count; i++) {
@@ -202,7 +202,7 @@ int oauth2_refresh_token(OAuth2Server *srv, const char *refresh_token,
 int oauth2_validate_access_token(const OAuth2Server *srv, const char *access_token,
                                   char *client_id_out, size_t ci_size,
                                   char *scope_out, size_t sc_size) {
-    const OAuth2TokenEntry *entry = oauth2_find_access_token(srv, access_token);
+    OAuth2TokenEntry *entry = oauth2_find_access_token((OAuth2Server *)srv, access_token);
     if (!entry) return -1;
     if (entry->revoked) return -2;
     if (time(NULL) > entry->access_expires_at) return -3;

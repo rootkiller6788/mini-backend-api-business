@@ -1,6 +1,7 @@
 #include "grpc_sim.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdint.h>
 
 const char* grpc_rpc_type_string(grpc_rpc_type_t t) {
     static const char* names[] = { "UNARY", "SERVER_STREAM", "CLIENT_STREAM", "BIDI_STREAM" };
@@ -70,8 +71,8 @@ void grpc_sim_init(grpc_sim_t* g) {
 }
 
 grpc_service_def_t* grpc_sim_add_service(grpc_sim_t* g, const char* name, const char* package) {
-    if (!g || g->service_count >= GRPC_MAX_SERVICES) return NULL;
-    grpc_service_def_t* svc = &g->proto.services[g->service_count++];
+    if (!g || g->proto.service_count >= GRPC_MAX_SERVICES) return NULL;
+    grpc_service_def_t* svc = &g->proto.services[g->proto.service_count++];
     memset(svc, 0, sizeof(*svc));
     strncpy(svc->name, name, sizeof(svc->name) - 1);
     strncpy(svc->package, package, sizeof(svc->package) - 1);
@@ -162,9 +163,19 @@ uint32_t grpc_sim_open_stream(grpc_sim_t* g, grpc_rpc_type_t rpc_type) {
 }
 
 bool grpc_sim_grpc_frame(grpc_stream_t* stream, uint8_t* frame_data, int32_t frame_len) {
-    (void)stream;
-    (void)frame_data;
-    (void)frame_len;
+    if (!stream || !frame_data || frame_len < 5) return false;
+    uint8_t compressed_flag = frame_data[0];
+    uint32_t msg_len = ((uint32_t)frame_data[1] << 24) |
+                       ((uint32_t)frame_data[2] << 16) |
+                       ((uint32_t)frame_data[3] << 8)  |
+                       (uint32_t)frame_data[4];
+    stream->is_compressed = (compressed_flag == 1);
+
+    int32_t data_len = msg_len;
+    if (data_len > frame_len - 5) data_len = frame_len - 5;
+    if (data_len > (int32_t)sizeof(stream->message_data)) data_len = (int32_t)sizeof(stream->message_data);
+    memcpy(stream->message_data, frame_data + 5, (size_t)data_len);
+    stream->message_len = data_len;
     return true;
 }
 
@@ -269,4 +280,224 @@ bool grpc_sim_close_stream(grpc_sim_t* g, uint32_t stream_id, grpc_status_code_t
         }
     }
     return false;
+}
+
+uint32_t grpc_varint_encode(uint64_t value, uint8_t* buf) {
+    uint32_t pos = 0;
+    while (value > 0x7F) {
+        buf[pos++] = (uint8_t)((value & 0x7F) | 0x80);
+        value >>= 7;
+    }
+    buf[pos++] = (uint8_t)(value & 0x7F);
+    return pos;
+}
+
+int32_t grpc_varint_decode(const uint8_t* buf, int32_t max_len, uint64_t* value) {
+    if (!buf || !value || max_len <= 0) return -1;
+    *value = 0;
+    int32_t shift = 0;
+    for (int32_t i = 0; i < max_len; i++) {
+        *value |= ((uint64_t)(buf[i] & 0x7F)) << shift;
+        if ((buf[i] & 0x80) == 0) return i + 1;
+        shift += 7;
+        if (shift >= 64) return -1;
+    }
+    return -1;
+}
+
+uint32_t grpc_zigzag32_encode(int32_t value) {
+    return (uint32_t)((value << 1) ^ (value >> 31));
+}
+
+int32_t grpc_zigzag32_decode(uint32_t value) {
+    return (int32_t)((value >> 1) ^ (uint32_t)(-(int32_t)(value & 1)));
+}
+
+uint64_t grpc_zigzag64_encode(int64_t value) {
+    return (uint64_t)((value << 1) ^ (value >> 63));
+}
+
+int64_t grpc_zigzag64_decode(uint64_t value) {
+    return (int64_t)((value >> 1) ^ (uint64_t)(-(int64_t)(value & 1)));
+}
+
+static int32_t grpc_wire_type_for_proto(grpc_proto_type_t type) {
+    switch (type) {
+        case GRPC_PROTO_INT32: case GRPC_PROTO_INT64: case GRPC_PROTO_UINT32:
+        case GRPC_PROTO_UINT64: case GRPC_PROTO_BOOL: case GRPC_PROTO_ENUM:
+        case GRPC_PROTO_SINT32: case GRPC_PROTO_SINT64:
+            return 0;
+        case GRPC_PROTO_FIXED64: case GRPC_PROTO_SFIXED64: case GRPC_PROTO_DOUBLE:
+            return 1;
+        case GRPC_PROTO_STRING: case GRPC_PROTO_BYTES: case GRPC_PROTO_MESSAGE:
+            return 2;
+        case GRPC_PROTO_FIXED32: case GRPC_PROTO_SFIXED32: case GRPC_PROTO_FLOAT:
+            return 5;
+        default:
+            return 2;
+    }
+}
+
+int32_t grpc_wire_encode_field(uint8_t* buf, int32_t field_number, grpc_proto_type_t type,
+                                const void* value, int32_t value_len) {
+    if (!buf || !value || field_number <= 0) return 0;
+    int32_t wire_type = grpc_wire_type_for_proto(type);
+    uint32_t key = (uint32_t)((field_number << 3) | wire_type);
+    uint8_t key_buf[10];
+    uint32_t key_len = grpc_varint_encode(key, key_buf);
+    memcpy(buf, key_buf, key_len);
+    int32_t off = (int32_t)key_len;
+
+    switch (wire_type) {
+        case 0: {
+            uint64_t v = 0;
+            if (value_len >= (int32_t)sizeof(uint64_t)) memcpy(&v, value, sizeof(uint64_t));
+            else if (value_len >= (int32_t)sizeof(uint32_t)) { uint32_t v32; memcpy(&v32, value, sizeof(uint32_t)); v = v32; }
+            else { uint8_t v8; memcpy(&v8, value, sizeof(uint8_t)); v = v8; }
+            if (type == GRPC_PROTO_SINT32) v = grpc_zigzag32_encode((int32_t)v);
+            else if (type == GRPC_PROTO_SINT64) v = grpc_zigzag64_encode((int64_t)v);
+            off += (int32_t)grpc_varint_encode(v, buf + off);
+            break;
+        }
+        case 1: {
+            uint64_t fix = 0;
+            memcpy(&fix, value, sizeof(uint64_t));
+            memcpy(buf + off, &fix, 8);
+            off += 8;
+            break;
+        }
+        case 2: {
+            uint8_t len_buf[10];
+            uint32_t len_enc = grpc_varint_encode((uint64_t)value_len, len_buf);
+            memcpy(buf + off, len_buf, len_enc);
+            off += (int32_t)len_enc;
+            memcpy(buf + off, value, (size_t)value_len);
+            off += value_len;
+            break;
+        }
+        case 5: {
+            uint32_t fix32 = 0;
+            memcpy(&fix32, value, sizeof(uint32_t));
+            memcpy(buf + off, &fix32, 4);
+            off += 4;
+            break;
+        }
+        default:
+            break;
+    }
+    return off;
+}
+
+int32_t grpc_wire_decode_field(const uint8_t* buf, int32_t len, int32_t* field_number,
+                                grpc_proto_type_t* type, void* value, int32_t* value_len) {
+    if (!buf || !field_number || !type || !value || !value_len || len <= 0) return -1;
+
+    uint64_t key = 0;
+    int32_t key_len = grpc_varint_decode(buf, len, &key);
+    if (key_len <= 0) return -1;
+
+    *field_number = (int32_t)(key >> 3);
+    int32_t wire_type = (int32_t)(key & 0x07);
+    int32_t off = key_len;
+
+    switch (wire_type) {
+        case 0: {
+            uint64_t v = 0;
+            int32_t vlen = grpc_varint_decode(buf + off, len - off, &v);
+            if (vlen <= 0) return -1;
+            memcpy(value, &v, sizeof(uint64_t));
+            *value_len = (int32_t)sizeof(uint64_t);
+            off += vlen;
+            *type = GRPC_PROTO_UINT64;
+            break;
+        }
+        case 1: {
+            if (len - off < 8) return -1;
+            uint64_t v;
+            memcpy(&v, buf + off, 8);
+            memcpy(value, &v, sizeof(uint64_t));
+            *value_len = 8;
+            off += 8;
+            *type = GRPC_PROTO_FIXED64;
+            break;
+        }
+        case 2: {
+            uint64_t slen = 0;
+            int32_t llen = grpc_varint_decode(buf + off, len - off, &slen);
+            if (llen <= 0) return -1;
+            off += llen;
+            if (slen > (uint64_t)(len - off)) slen = (uint64_t)(len - off);
+            memcpy(value, buf + off, (size_t)slen);
+            *value_len = (int32_t)slen;
+            off += (int32_t)slen;
+            *type = GRPC_PROTO_BYTES;
+            break;
+        }
+        case 5: {
+            if (len - off < 4) return -1;
+            uint32_t v;
+            memcpy(&v, buf + off, 4);
+            memcpy(value, &v, sizeof(uint32_t));
+            *value_len = 4;
+            off += 4;
+            *type = GRPC_PROTO_FIXED32;
+            break;
+        }
+        default:
+            return -1;
+    }
+    return off;
+}
+
+bool grpc_sim_encode_message(grpc_message_def_t* msg, const void** field_values,
+                              const int32_t* field_lens, int32_t field_count,
+                              uint8_t* out, int32_t* out_len) {
+    if (!msg || !field_values || !field_lens || !out || !out_len) return false;
+    int32_t off = 0;
+    for (int32_t i = 0; i < field_count && i < msg->field_count; i++) {
+        int32_t written = grpc_wire_encode_field(out + off, msg->fields[i].field_number,
+                                                  msg->fields[i].type,
+                                                  field_values[i], field_lens[i]);
+        if (written <= 0) return false;
+        off += written;
+        if (off >= GRPC_MAX_FRAME_SIZE) break;
+    }
+    *out_len = off;
+    return true;
+}
+
+bool grpc_sim_decode_message(grpc_message_def_t* msg, const uint8_t* data, int32_t len,
+                              void** field_values, int32_t* field_lens, int32_t* field_count) {
+    if (!msg || !data || !field_values || !field_lens || !field_count) return false;
+    int32_t off = 0;
+    int32_t count = 0;
+    while (off < len && count < msg->field_count) {
+        int32_t fn = 0;
+        grpc_proto_type_t pt;
+        int32_t vlen = 0;
+        int32_t consumed = grpc_wire_decode_field(data + off, len - off, &fn, &pt,
+                                                   field_values[count], &vlen);
+        if (consumed <= 0) break;
+        field_lens[count] = vlen;
+        off += consumed;
+        count++;
+    }
+    *field_count = count;
+    return true;
+}
+
+bool grpc_sim_health_check(grpc_sim_t* g, const char* service_name, grpc_status_code_t* status) {
+    if (!g || !status) return false;
+    if (!service_name) {
+        *status = GRPC_OK;
+        return true;
+    }
+    for (int32_t i = 0; i < g->proto.service_count; i++) {
+        if (strcmp(g->proto.services[i].name, service_name) == 0) {
+            *status = GRPC_OK;
+            return true;
+        }
+    }
+    *status = GRPC_NOT_FOUND;
+    return true;
 }

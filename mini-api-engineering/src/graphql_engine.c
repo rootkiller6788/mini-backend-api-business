@@ -30,6 +30,14 @@ void gql_schema_init(gql_schema_t* s) {
     memset(s, 0, sizeof(*s));
 }
 
+static const gql_type_t* gql_find_type_schema(gql_schema_t* s, const char* name) {
+    if (!s || !name) return NULL;
+    for (int32_t i = 0; i < s->type_count; i++) {
+        if (strcmp(s->types[i].name, name) == 0) return &s->types[i];
+    }
+    return NULL;
+}
+
 void gql_schema_add_type(gql_schema_t* s, const char* name) {
     if (!s || s->type_count >= GQL_MAX_TYPES || !name) return;
     gql_type_t* t = &s->types[s->type_count++];
@@ -101,14 +109,6 @@ void gql_schema_add_resolver(gql_schema_t* s, const char* type_name, const char*
     r->context = context;
 }
 
-static const gql_type_t* gql_find_type_schema(gql_schema_t* s, const char* name) {
-    if (!s || !name) return NULL;
-    for (int32_t i = 0; i < s->type_count; i++) {
-        if (strcmp(s->types[i].name, name) == 0) return &s->types[i];
-    }
-    return NULL;
-}
-
 const gql_type_t* gql_find_type(gql_engine_t* e, const char* name) {
     if (!e || !name) return NULL;
     return gql_find_type_schema(&e->schema, name);
@@ -123,6 +123,35 @@ static char* gql_parse_name(const char** p, char* buf, size_t len) {
     const char* start = *p;
     if (!isalpha((unsigned char)**p) && **p != '_') return NULL;
     while (**p && (isalnum((unsigned char)**p) || **p == '_')) (*p)++;
+    size_t n = (size_t)(*p - start);
+    if (n >= len) n = len - 1;
+    memcpy(buf, start, n);
+    buf[n] = '\0';
+    gql_skip_whitespace(p);
+    return buf;
+}
+
+static char* gql_parse_value(const char** p, char* buf, size_t len) {
+    gql_skip_whitespace(p);
+    const char* start = *p;
+    if (!**p) return NULL;
+    if (**p == '$') {
+        (*p)++;
+        if (!isalpha((unsigned char)**p) && **p != '_') return NULL;
+        while (**p && (isalnum((unsigned char)**p) || **p == '_')) (*p)++;
+    } else if (isalpha((unsigned char)**p) || **p == '_') {
+        while (**p && (isalnum((unsigned char)**p) || **p == '_')) (*p)++;
+    } else if (**p == '-' || isdigit((unsigned char)**p)) {
+        if (**p == '-') (*p)++;
+        while (**p && isdigit((unsigned char)**p)) (*p)++;
+        if (**p == '.') { (*p)++; while (**p && isdigit((unsigned char)**p)) (*p)++; }
+        if (**p == 'e' || **p == 'E') {
+            (*p)++; if (**p == '+' || **p == '-') (*p)++;
+            while (**p && isdigit((unsigned char)**p)) (*p)++;
+        }
+    } else {
+        return NULL;
+    }
     size_t n = (size_t)(*p - start);
     if (n >= len) n = len - 1;
     memcpy(buf, start, n);
@@ -165,7 +194,7 @@ static bool gql_parse_selection_set(gql_engine_t* e, const char** p) {
                     arg_val[vn] = '\0';
                     if (**p == '"') (*p)++;
                 } else {
-                    if (!gql_parse_name(p, arg_val, sizeof(arg_val))) return false;
+                    if (!gql_parse_value(p, arg_val, sizeof(arg_val))) return false;
                 }
                 if (e->parsed.arg_count < GQL_MAX_ARGS) {
                     gql_argument_t* a = &e->parsed.args[e->parsed.arg_count++];
@@ -177,6 +206,7 @@ static bool gql_parse_selection_set(gql_engine_t* e, const char** p) {
             }
             if (**p == ')') (*p)++;
         }
+        gql_skip_whitespace(p);
         if (**p == '{') {
             sel->is_leaf = false;
             (*p)++;
@@ -215,7 +245,7 @@ bool gql_parse_query(gql_engine_t* e, const char* query) {
         gql_skip_whitespace(&p);
     }
 
-    if (**p == '{') {
+    if (*p == '{') {
         return gql_parse_selection_set(e, &p);
     }
 
@@ -223,27 +253,27 @@ bool gql_parse_query(gql_engine_t* e, const char* query) {
     if (strlen(e->parsed.target_field) == 0) return false;
 
     gql_skip_whitespace(&p);
-    if (**p == '(') {
-        (*p)++;
-        while (**p && **p != ')') {
+    if (*p == '(') {
+        p++;
+        while (*p && *p != ')') {
             gql_skip_whitespace(&p);
             char arg_name[GQL_MAX_NAME_LEN];
             if (!gql_parse_name(&p, arg_name, sizeof(arg_name))) return false;
             gql_skip_whitespace(&p);
-            if (**p != ':') return false;
-            (*p)++;
+            if (*p != ':') return false;
+            p++;
             gql_skip_whitespace(&p);
             char arg_val[256];
-            if (**p == '"') {
-                (*p)++;
-                const char* vs = *p;
-                while (**p && **p != '"') (*p)++;
-                size_t vn = (size_t)(*p - vs);
+            if (*p == '"') {
+                p++;
+                const char* vs = p;
+                while (*p && *p != '"') p++;
+                size_t vn = (size_t)(p - vs);
                 if (vn >= sizeof(arg_val)) vn = sizeof(arg_val) - 1;
                 memcpy(arg_val, vs, vn); arg_val[vn] = '\0';
-                if (**p == '"') (*p)++;
+                if (*p == '"') p++;
             } else {
-                if (!gql_parse_name(&p, arg_val, sizeof(arg_val))) return false;
+                if (!gql_parse_value(&p, arg_val, sizeof(arg_val))) return false;
             }
             if (e->parsed.arg_count < GQL_MAX_ARGS) {
                 gql_argument_t* a = &e->parsed.args[e->parsed.arg_count++];
@@ -251,13 +281,13 @@ bool gql_parse_query(gql_engine_t* e, const char* query) {
                 strncpy(a->default_value, arg_val, sizeof(a->default_value) - 1);
             }
             gql_skip_whitespace(&p);
-            if (**p == ',') (*p)++;
+            if (*p == ',') p++;
         }
-        if (**p == ')') (*p)++;
+        if (*p == ')') p++;
     }
 
     gql_skip_whitespace(&p);
-    if (**p == '{') return gql_parse_selection_set(e, &p);
+    if (*p == '{') return gql_parse_selection_set(e, &p);
     return e->parsed.selection_count > 0;
 }
 
@@ -300,7 +330,7 @@ bool gql_parse_schema_sdl(gql_engine_t* e, const char* sdl) {
                             char a_t[GQL_MAX_NAME_LEN];
                             if (!gql_parse_name(&p, a_t, sizeof(a_t))) break;
                             bool req = false;
-                            if (**p == '!') { req = true; (*p)++; }
+                            if (*p == '!') { req = true; p++; }
                             gql_schema_add_field_arg(&e->schema, name, field, a_n, a_t, req);
                             if (*p == ',') p++;
                         }
@@ -427,4 +457,145 @@ int32_t gql_error_count(gql_engine_t* e) {
 const char* gql_error_message(gql_engine_t* e, int32_t index) {
     if (!e || index < 0 || index >= e->error_count) return NULL;
     return e->errors[index];
+}
+
+int32_t gql_calculate_query_cost(gql_engine_t* e) {
+    if (!e) return 0;
+    int32_t cost = 1;
+    for (int32_t i = 0; i < e->parsed.selection_count; i++) {
+        if (e->parsed.selections[i].is_leaf) {
+            cost += 1;
+        } else {
+            cost += 2;
+        }
+    }
+    for (int32_t i = 0; i < e->parsed.arg_count; i++) {
+        cost += 1;
+    }
+    return cost;
+}
+
+int32_t gql_calculate_query_depth(gql_engine_t* e) {
+    if (!e) return 0;
+    if (e->parsed.selection_count == 0) return 0;
+
+    int32_t max_depth = 0;
+    for (int32_t i = 0; i < e->parsed.selection_count; i++) {
+        int32_t d = e->parsed.selections[i].is_leaf ? 1 : 2;
+        if (d > max_depth) max_depth = d;
+    }
+
+    if (strlen(e->parsed.target_field) > 0) max_depth++;
+
+    return max_depth;
+}
+
+bool gql_limit_query_complexity(gql_engine_t* e, int32_t max_cost, int32_t max_depth) {
+    if (!e) return false;
+    int32_t cost = gql_calculate_query_cost(e);
+    int32_t depth = gql_calculate_query_depth(e);
+
+    e->error_count = 0;
+    if (cost > max_cost) {
+        snprintf(e->errors[e->error_count++], 511,
+                 "Query cost %d exceeds max %d", cost, max_cost);
+        return false;
+    }
+    if (depth > max_depth) {
+        snprintf(e->errors[e->error_count++], 511,
+                 "Query depth %d exceeds max %d", depth, max_depth);
+        return false;
+    }
+    return true;
+}
+
+char* gql_sdl_from_schema(gql_engine_t* e, char* buf, size_t len) {
+    if (!e || !buf) return NULL;
+    int off = 0;
+
+    for (int32_t i = 0; i < e->schema.type_count; i++) {
+        gql_type_t* t = &e->schema.types[i];
+        if (t->is_enum) {
+            off += snprintf(buf + off, len - off, "enum %s {\n", t->name);
+            for (int32_t j = 0; j < t->enum_count; j++)
+                off += snprintf(buf + off, len - off, "  %s\n", t->enum_values[j]);
+            off += snprintf(buf + off, len - off, "}\n\n");
+        } else {
+            off += snprintf(buf + off, len - off, "type %s {\n", t->name);
+            for (int32_t j = 0; j < t->field_count; j++) {
+                gql_field_t* f = &t->fields[j];
+                off += snprintf(buf + off, len - off, "  %s", f->name);
+                if (f->arg_count > 0) {
+                    off += snprintf(buf + off, len - off, "(");
+                    for (int32_t k = 0; k < f->arg_count; k++)
+                        off += snprintf(buf + off, len - off, "%s%s: %s%s",
+                                        k > 0 ? ", " : "",
+                                        f->args[k].name,
+                                        f->args[k].type,
+                                        f->args[k].is_required ? "!" : "");
+                    off += snprintf(buf + off, len - off, ")");
+                }
+                off += snprintf(buf + off, len - off, ": %s%s%s\n",
+                                f->type_name,
+                                f->is_list ? "[]" : "",
+                                f->is_non_null ? "!" : "");
+            }
+            off += snprintf(buf + off, len - off, "}\n\n");
+        }
+    }
+    if (strlen(e->schema.query_type) > 0)
+        off += snprintf(buf + off, len - off, "schema {\n  query: %s\n}\n",
+                        e->schema.query_type);
+    return buf;
+}
+
+bool gql_validate_schema(gql_engine_t* e) {
+    if (!e) return false;
+    e->error_count = 0;
+    bool valid = true;
+
+    if (e->schema.type_count == 0) {
+        snprintf(e->errors[e->error_count++], 511, "Schema has no types defined");
+        return false;
+    }
+
+    for (int32_t i = 0; i < e->schema.type_count; i++) {
+        gql_type_t* t = &e->schema.types[i];
+        if (strlen(t->name) == 0) {
+            snprintf(e->errors[e->error_count++], 511, "Type at index %d has no name", i);
+            valid = false;
+        }
+        for (int32_t j = 0; j < t->field_count; j++) {
+            if (strlen(t->fields[j].name) == 0) {
+                snprintf(e->errors[e->error_count++], 511,
+                         "Field at index %d in type %s has no name", j, t->name);
+                valid = false;
+            }
+        }
+    }
+
+    if (strlen(e->schema.query_type) > 0) {
+        if (!gql_find_type_schema(&e->schema, e->schema.query_type)) {
+            snprintf(e->errors[e->error_count++], 511,
+                     "Query type '%s' not found in schema", e->schema.query_type);
+            valid = false;
+        }
+    }
+
+    return valid;
+}
+
+int32_t gql_type_field_count(gql_engine_t* e, const char* type_name) {
+    const gql_type_t* t = gql_find_type(e, type_name);
+    return t ? t->field_count : 0;
+}
+
+bool gql_has_field(gql_engine_t* e, const char* type_name, const char* field_name) {
+    if (!e || !type_name || !field_name) return false;
+    const gql_type_t* t = gql_find_type(e, type_name);
+    if (!t) return false;
+    for (int32_t i = 0; i < t->field_count; i++) {
+        if (strcmp(t->fields[i].name, field_name) == 0) return true;
+    }
+    return false;
 }

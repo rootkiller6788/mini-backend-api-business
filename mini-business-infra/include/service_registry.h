@@ -78,6 +78,26 @@ int            sr_service_count(sr_registry_t *registry);
 void           sr_ttl_watchdog_start(sr_registry_t *registry);
 void           sr_ttl_watchdog_stop(sr_registry_t *registry);
 
+/* L4: Quorum-based health check */
+int            sr_health_check_quorum(sr_registry_t *registry, const char *service_name,
+                                       const char *instance_id, int observer_count,
+                                       int quorum_threshold);
+
+/* L7: Service dependency graph */
+typedef enum {
+    SR_DEP_OK       = 0,
+    SR_DEP_DEGRADED = 1,
+    SR_DEP_DOWN     = 2
+} sr_dependency_status_t;
+
+int            sr_dependency_add(sr_registry_t *registry, const char *from_svc,
+                                  const char *to_svc);
+int            sr_dependency_check(sr_registry_t *registry, const char *service_name);
+
+/* L8: Rendezvous hashing (Highest Random Weight) */
+int            sr_lookup_rendezvous(sr_registry_t *registry, const char *service_name,
+                                     const char *key, sr_instance_t *instance);
+
 #ifdef __cplusplus
 }
 #endif

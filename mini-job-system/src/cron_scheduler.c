@@ -160,6 +160,8 @@ int cron_matches(const cron_expression_t *expr, const struct tm *tm_val)
 static int cron_field_next(const cron_field_def_t *field, int val,
                            int min_val, int max_val)
 {
+    (void)min_val;
+    (void)max_val;
     if (field->type == CRON_ENTRY_ANY)
         return val + 1;
 
@@ -173,6 +175,7 @@ static int cron_field_next(const cron_field_def_t *field, int val,
 static int cron_field_first(const cron_field_def_t *field,
                             int min_val, int max_val)
 {
+    (void)max_val;
     if (field->type == CRON_ENTRY_ANY)
         return min_val;
     if (field->count > 0)

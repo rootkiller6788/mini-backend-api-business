@@ -2,10 +2,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+
+#ifndef _WIN32
 #include <unistd.h>
 #include <sys/wait.h>
 #include <signal.h>
-#include <errno.h>
+#endif
 
 void cgi_config_init(CgiConfig *cfg, const char *script_path) {
     memset(cfg, 0, sizeof(*cfg));
@@ -47,6 +50,7 @@ void cgi_config_set_request_env(CgiConfig *cfg, const HttpRequest *req) {
     if (ua) cgi_config_add_env(cfg, "HTTP_USER_AGENT", ua);
 }
 
+#ifndef _WIN32
 static int wait_with_timeout(pid_t pid, int timeout_sec) {
     int status = 0;
     int waited = 0;
@@ -68,8 +72,8 @@ bool cgi_execute(const CgiConfig *cfg, const HttpRequest *req,
 
     memset(result, 0, sizeof(*result));
 
-    int stdin_pipe[2];  /* parent writes body to child's stdin  */
-    int stdout_pipe[2]; /* child writes response to parent      */
+    int stdin_pipe[2];
+    int stdout_pipe[2];
     int stderr_pipe[2];
 
     if (pipe(stdin_pipe) < 0) return false;
@@ -89,7 +93,6 @@ bool cgi_execute(const CgiConfig *cfg, const HttpRequest *req,
     }
 
     if (pid == 0) {
-        /* Child */
         dup2(stdin_pipe[0], STDIN_FILENO);
         dup2(stdout_pipe[1], STDOUT_FILENO);
         dup2(stderr_pipe[1], STDERR_FILENO);
@@ -107,7 +110,6 @@ bool cgi_execute(const CgiConfig *cfg, const HttpRequest *req,
         _exit(EXIT_FAILURE);
     }
 
-    /* Parent */
     close(stdin_pipe[0]); close(stdout_pipe[1]); close(stderr_pipe[1]);
 
     if (req->body && req->body_len > 0 && cfg->pass_body) {
@@ -148,6 +150,19 @@ bool cgi_execute(const CgiConfig *cfg, const HttpRequest *req,
 
     return true;
 }
+#else  /* _WIN32 — CGI not supported on Windows */
+bool cgi_execute(const CgiConfig *cfg, const HttpRequest *req,
+                  CgiResult *result) {
+    (void)cfg; (void)req;
+    if (!result) return false;
+    memset(result, 0, sizeof(*result));
+    result->exit_code = -1;
+    snprintf(result->stderr_data, CGI_MAX_OUTPUT - 1,
+             "CGI not supported on Windows");
+    result->stderr_len = strlen(result->stderr_data);
+    return false;
+}
+#endif /* _WIN32 */
 
 bool cgi_parse_status_line(const char *data, size_t len, int *status_code,
                             char *status_text, size_t text_sz) {

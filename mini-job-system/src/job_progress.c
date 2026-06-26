@@ -55,6 +55,12 @@ static const char *state_name(jp_state_t state)
     }
 }
 
+/* Convert job_progress state to string for public introspection */
+const char *jp_state_name(jp_state_t state)
+{
+    return state_name(state);
+}
+
 int jp_transition_state(job_progress_t *jp, jp_state_t new_state,
                         const char *message)
 {

@@ -68,4 +68,7 @@ time_t     jp_get_elapsed(const job_progress_t *jp);
 
 const jp_log_entry_t *jp_get_log(const job_progress_t *jp, int *count);
 
+/* Utility: convert state enum to human-readable string */
+const char *jp_state_name(jp_state_t state);
+
 #endif

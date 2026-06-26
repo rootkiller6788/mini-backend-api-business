@@ -13,7 +13,11 @@ SRCS = $(SRCDIR)/oauth2_server.c \
        $(SRCDIR)/jwt_auth.c \
        $(SRCDIR)/rbac_engine.c \
        $(SRCDIR)/sso_model.c \
-       $(SRCDIR)/rate_limiter.c
+       $(SRCDIR)/rate_limiter.c \
+       $(SRCDIR)/crypto_utils.c \
+       $(SRCDIR)/audit_log.c \
+       $(SRCDIR)/session_manager.c \
+       $(SRCDIR)/web_security.c
 
 OBJS = $(SRCS:$(SRCDIR)/%.c=$(OUTDIR)/%.o)
 
@@ -22,8 +26,13 @@ DEMOS    = demo_sso demo_rate_limiter
 
 all: dirs lib examples demos
 
+test: dirs lib
+	$(CC) $(CFLAGS) $(INCLUDES) tests/test_all.c $(OBJS) $(LDFLAGS) -Wl,--stack,33554432 -o $(OUTDIR)/test_all
+	@echo "Running tests..."
+	@PATH="$(OUTDIR):$$PATH" $(OUTDIR)/test_all && echo "=== All tests passed ==="
+
 dirs:
-	@if not exist "$(OUTDIR)" mkdir "$(OUTDIR)"
+	@mkdir -p "$(OUTDIR)"
 
 lib: $(OBJS)
 	ar rcs $(OUTDIR)/libminiauth.a $(OBJS)
@@ -69,6 +78,6 @@ run_demos: demos
 run_all: run_examples run_demos
 
 clean:
-	@if exist "$(OUTDIR)" del /q "$(OUTDIR)\*" 2>nul
+	@rm -rf "$(OUTDIR)"/* 2>/dev/null || true
 
-.PHONY: all dirs lib examples demos run_examples run_demos run_all clean
+.PHONY: all dirs lib examples demos test run_examples run_demos run_all clean

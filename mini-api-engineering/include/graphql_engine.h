@@ -7,12 +7,12 @@
 
 #define GQL_MAX_NAME_LEN       128
 #define GQL_MAX_TYPE_LEN       64
-#define GQL_MAX_ARGS           16
-#define GQL_MAX_FIELDS         64
-#define GQL_MAX_TYPES          64
-#define GQL_MAX_RESOLVERS      128
+#define GQL_MAX_ARGS           8
+#define GQL_MAX_FIELDS         16
+#define GQL_MAX_TYPES          32
+#define GQL_MAX_RESOLVERS      64
 #define GQL_MAX_QUERY_LEN      8192
-#define GQL_MAX_SELECTION      128
+#define GQL_MAX_SELECTION      64
 #define GQL_MAX_SCHEMA_LEN     16384
 #define GQL_MAX_ERRORS         16
 
@@ -139,5 +139,14 @@ char* gql_introspect_type(gql_engine_t* e, const char* type_name, char* buf, siz
 const gql_type_t* gql_find_type(gql_engine_t* e, const char* name);
 int32_t gql_error_count(gql_engine_t* e);
 const char* gql_error_message(gql_engine_t* e, int32_t index);
+
+int32_t gql_calculate_query_cost(gql_engine_t* e);
+int32_t gql_calculate_query_depth(gql_engine_t* e);
+bool gql_limit_query_complexity(gql_engine_t* e, int32_t max_cost, int32_t max_depth);
+
+char* gql_sdl_from_schema(gql_engine_t* e, char* buf, size_t len);
+bool gql_validate_schema(gql_engine_t* e);
+int32_t gql_type_field_count(gql_engine_t* e, const char* type_name);
+bool gql_has_field(gql_engine_t* e, const char* type_name, const char* field_name);
 
 #endif

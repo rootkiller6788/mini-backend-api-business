@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include "ddd_model.h"
 
 #define BPMN_ID_LEN         64
 #define BPMN_NAME_LEN      128

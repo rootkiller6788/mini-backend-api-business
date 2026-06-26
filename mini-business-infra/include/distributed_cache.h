@@ -87,6 +87,34 @@ double       dc_cache_hit_rate(dc_cache_t *cache);
 
 void         dc_cache_compact(dc_cache_t *cache);
 
+/* === L4: Version Vectors for Cache Coherence === */
+#define DC_MAX_VV_NODES 32
+
+typedef struct {
+    int64_t counters[DC_MAX_VV_NODES];
+    int     node_count;
+} dc_version_vector_t;
+
+int          dc_cache_put_with_version(dc_cache_t *cache, const char *key,
+                                       const uint8_t *value, size_t value_len,
+                                       int32_t ttl_seconds,
+                                       const dc_version_vector_t *vv, int node_id);
+
+/* L7: Cache warming */
+int          dc_cache_warm(dc_cache_t *cache, const char **hot_keys, int key_count);
+
+/* L8: Lease-based cache coherency (Gray & Cheriton, 1989) */
+int          dc_cache_set_lease(dc_cache_t *cache, const char *key,
+                                int64_t lease_duration_ms);
+
+/* L7: Bloom filter integration for cache penetration prevention */
+struct bf_bloom_filter;
+int          dc_cache_get_with_bloom(dc_cache_t *cache, const char *key,
+                                      uint8_t **value, size_t *value_len,
+                                      struct bf_bloom_filter *bloom);
+int          dc_cache_populate_bloom(dc_cache_t *cache, struct bf_bloom_filter *bloom,
+                                      const char **keys, int key_count);
+
 #ifdef __cplusplus
 }
 #endif
