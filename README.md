@@ -14,7 +14,17 @@ A collection of **from-scratch, zero-dependency C implementations** of backend s
 | [mini-business-infra](mini-business-infra/) | Message queue (pub/sub, dead letter), distributed cache (LRU, TTL), config center (hot reload), service registration | RabbitMQ, Redis, Nacos |
 | [mini-job-system](mini-job-system/) | Cron scheduler, delayed job queue, work queue (worker pool), task retry with backoff, job progress tracking | Celery, Sidekiq, Quartz |
 
+## Design Philosophy
+
+- **Zero external dependencies** — pure C (C99/C11), only `libc` and `libm`
+- **Self-contained modules** — each directory has its own `Makefile`, `include/`, `src/`, `examples/`, `demos/`, `tests/`
+- **Backend simulation in user-space** — educational models of backend services, auth flows, and business architecture
+- **Theory-to-code mapping** — every module includes `docs/` with reference-alignment notes
+- **Practical demos** — HTTP server, OAuth2 auth server, message queue engine, job scheduler, and more
+
 ## Building
+
+Each module is standalone. Navigate to a module directory and run:
 
 ```bash
 cd mini-web-server
@@ -22,4 +32,21 @@ make all    # build everything
 make test   # run tests
 ```
 
-Requires **GCC** and **GNU Make**. MIT License.
+Requires **GCC** and **GNU Make**.
+
+## Project Structure
+
+```
+mini-backend-api-business/
+├── mini-web-server/             # Web Server
+├── mini-api-engineering/        # API Engineering
+├── mini-backend-framework/      # Backend Framework
+├── mini-auth-security/          # Authentication & Security
+├── mini-business-arch/          # Business Architecture (DDD/CQRS)
+├── mini-business-infra/         # Business Infrastructure
+└── mini-job-system/             # Job Scheduling System
+```
+
+## License
+
+MIT
